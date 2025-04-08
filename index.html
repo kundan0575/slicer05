@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Slicer (No Canvas)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            background-color: #333;
+            color: white;
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .workspace {
+            display: flex;
+            margin-top: 20px;
+        }
+        .tools {
+            width: 200px;
+            background-color: #ddd;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .image-container {
+            position: relative;
+            flex-grow: 1;
+            margin-left: 20px;
+            background-color: #fff;
+            border: 1px solid #ccc;
+            overflow: auto;
+            height: 600px;
+        }
+        .loaded-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+        .button {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-align: center;
+        }
+        .button:hover {
+            background-color: #45a049;
+        }
+        .ruler {
+            position: absolute;
+            background-color: rgba(255, 0, 0, 0.5);
+            z-index: 10;
+        }
+        .horizontal-ruler {
+            height: 5px;
+            width: 100%;
+            cursor: ns-resize;
+        }
+        .vertical-ruler {
+            width: 5px;
+            height: 100%;
+            cursor: ew-resize;
+        }
+        .slice-preview {
+            position: absolute;
+            border: 2px dashed blue;
+            background-color: rgba(0, 0, 255, 0.1);
+            pointer-events: none;
+            z-index: 5;
+        }
+        .slice-info {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 5px;
+            border-radius: 3px;
+            font-size: 12px;
+            z-index: 15;
+        }
+        .slices-panel {
+            margin-top: 15px;
+        }
+        .slice-item {
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            padding: 8px;
+            margin-bottom: 5px;
+            cursor: pointer;
+        }
+        .slice-item:hover {
+            background-color: #e9e9e9;
+        }
+        @media (max-width: 767px){
+            .workspace{
+                flex-wrap: wrap;
+            }
+            .tools, .image-container{
+                width: 100%;
+            }
+        }
+        #guidelines-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            z-index: 8;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Image Slicer (No Canvas)</h1>
+        <div>
+            <input type="file" id="imageInput" accept="image/*" style="display: none;">
+            <button class="button" onclick="document.getElementById('imageInput').click()">Load Image</button>
+        </div>
+    </div>
+    
+    <div class="container">
+
+        <div class="workspace">
+            <div class="tools">
+                <button class="button" id="addHorizontalRuler">Add Horizontal Ruler</button>
+                <button class="button" id="addVerticalRuler">Add Vertical Ruler</button>
+                <button class="button" id="sliceImage">Slice Image</button>
+                <button class="button" id="downloadSlices">Download All Slices</button>
+                <button class="button" id="clearRulers">Clear All Rulers</button>
+                
+                <div class="slices-panel">
+                    <h3>Slices</h3>
+                    <div id="slicesList"></div>
+                </div>
+
+                <button class="button" id="zoomIn">Zoom In (+)</button>
+<button class="button" id="zoomOut">Zoom Out (-)</button>
+<button class="button" id="resetZoom">Reset Zoom (100%)</button>
+            </div>
+            
+            <div class="image-container" id="imageContainer">
+                <svg id="guidelines-layer" width="100%" height="100%" style="position: absolute;"></svg>
+                <img id="loadedImage" class="loaded-image" style="display: none;">
+            </div>
+
+
+        </div>
+    </div>
+
+    <script>
+    // Main application
+const app = {
+    imageContainer: null,
+    loadedImage: null,
+    guidelinesLayer: null,
+    originalImage: null,
+    horizontalRulers: [],
+    verticalRulers: [],
+    slices: [],
+    activeRuler: null,
+    startPosition: { x: 0, y: 0 },
+    isDragging: false,
+    scrollInterval: null,
+    zoomLevel: 1, // Current zoom level
+    sliceConfiguration: {
+        rows: [], // Will store whether each row should be sliced (true) or kept full (false)
+        columns: [] // Will store whether each column should be sliced (true) or kept full (false)
+    },
+    
+    init: function() {
+        // Initialize elements
+        this.imageContainer = document.getElementById('imageContainer');
+        this.loadedImage = document.getElementById('loadedImage');
+        this.guidelinesLayer = document.getElementById('guidelines-layer');
+        
+        // Event listeners
+        document.getElementById('imageInput').addEventListener('change', this.loadImage.bind(this));
+        document.getElementById('addHorizontalRuler').addEventListener('click', this.addHorizontalRuler.bind(this));
+        document.getElementById('addVerticalRuler').addEventListener('click', this.addVerticalRuler.bind(this));
+        document.getElementById('sliceImage').addEventListener('click', this.generateSlices.bind(this));
+        document.getElementById('downloadSlices').addEventListener('click', this.downloadAllSlices.bind(this));
+        document.getElementById('clearRulers').addEventListener('click', this.clearRulers.bind(this));
+        document.getElementById('zoomIn').addEventListener('click', this.zoomIn.bind(this));
+        document.getElementById('zoomOut').addEventListener('click', this.zoomOut.bind(this));
+        document.getElementById('resetZoom').addEventListener('click', this.resetZoom.bind(this));
+        
+        // Add configuration panel buttons
+        document.getElementById('configureSlices').addEventListener('click', this.showSliceConfiguration.bind(this));
+        
+        // Mouse event listeners for ruler manipulation
+        this.imageContainer.addEventListener('mousedown', this.handleMouseDown.bind(this));
+        document.addEventListener('mousemove', this.handleMouseMove.bind(this));
+        document.addEventListener('mouseup', this.handleMouseUp.bind(this));
+        
+        // Touch event listeners for mobile
+        this.imageContainer.addEventListener('touchstart', this.handleTouchStart.bind(this));
+        document.addEventListener('touchmove', this.handleTouchMove.bind(this));
+        document.addEventListener('touchend', this.handleTouchEnd.bind(this));
+    },
+    
+    loadImage: function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            // Create a temporary image to get dimensions
+            const img = new Image();
+            img.onload = () => {
+                this.originalImage = {
+                    width: img.width,
+                    height: img.height,
+                    src: img.src
+                };
+                
+                // Set the loaded image
+                this.loadedImage.src = img.src;
+                this.loadedImage.style.display = 'block';
+                this.loadedImage.width = img.width;
+                this.loadedImage.height = img.height;
+                
+                // Set SVG layer dimensions
+                this.guidelinesLayer.setAttribute('width', img.width);
+                this.guidelinesLayer.setAttribute('height', img.height);
+                
+                // Reset zoom
+                this.resetZoom();
+                
+                // Clear any existing rulers and slices
+                this.clearRulers();
+            };
+            img.src = event.target.result;
+        };
+        reader.readAsDataURL(file);
+    },
+    
+    // Zoom functionality
+    zoomIn: function() {
+        if (!this.originalImage) {
+            alert('Please load an image first.');
+            return;
+        }
+        
+        this.zoomLevel = Math.min(this.zoomLevel * 1.2, 5); // Max zoom level: 5x
+        this.applyZoom();
+    },
+    
+    zoomOut: function() {
+        if (!this.originalImage) {
+            alert('Please load an image first.');
+            return;
+        }
+        
+        this.zoomLevel = Math.max(this.zoomLevel / 1.2, 0.2); // Min zoom level: 0.2x
+        this.applyZoom();
+    },
+    
+    resetZoom: function() {
+        if (!this.originalImage) return;
+        
+        this.zoomLevel = 1;
+        this.applyZoom();
+    },
+    
+    applyZoom: function() {
+        if (!this.originalImage) return;
+        
+        // Scale the image and its container
+        const scaledWidth = this.originalImage.width * this.zoomLevel;
+        const scaledHeight = this.originalImage.height * this.zoomLevel;
+        
+        // Update the image size
+        this.loadedImage.style.width = scaledWidth + 'px';
+        this.loadedImage.style.height = scaledHeight + 'px';
+        
+        // Update SVG layer dimensions
+        this.guidelinesLayer.setAttribute('width', scaledWidth);
+        this.guidelinesLayer.setAttribute('height', scaledHeight);
+        
+        // Update rulers positions
+        this.updateRulersForZoom();
+        
+        // Update guidelines
+        this.updateGuideLines();
+    },
+    
+    updateRulersForZoom: function() {
+        // Update horizontal rulers
+        this.horizontalRulers.forEach(ruler => {
+            const scaledPosition = ruler.position * this.zoomLevel;
+            ruler.element.style.top = scaledPosition + 'px';
+        });
+        
+        // Update vertical rulers
+        this.verticalRulers.forEach(ruler => {
+            const scaledPosition = ruler.position * this.zoomLevel;
+            ruler.element.style.left = scaledPosition + 'px';
+        });
+    },
+    
+    addHorizontalRuler: function() {
+        if (!this.originalImage) {
+            alert('Please load an image first.');
+            return;
+        }
+        
+        const y = Math.floor(this.originalImage.height / 2);
+        this.createHorizontalRuler(y);
+        this.updateGuideLines();
+    },
+    
+    addVerticalRuler: function() {
+        if (!this.originalImage) {
+            alert('Please load an image first.');
+            return;
+        }
+        
+        const x = Math.floor(this.originalImage.width / 2);
+        this.createVerticalRuler(x);
+        this.updateGuideLines();
+    },
+    
+    createHorizontalRuler: function(y) {
+        const ruler = document.createElement('div');
+        ruler.className = 'ruler horizontal-ruler';
+        ruler.style.top = (y * this.zoomLevel) + 'px';
+        ruler.dataset.type = 'horizontal';
+        ruler.dataset.position = y;
+        this.imageContainer.appendChild(ruler);
+        
+        // Add to horizontal rulers array
+        this.horizontalRulers.push({ element: ruler, position: y });
+    },
+    
+    createVerticalRuler: function(x) {
+        const ruler = document.createElement('div');
+        ruler.className = 'ruler vertical-ruler';
+        ruler.style.left = (x * this.zoomLevel) + 'px';
+        ruler.dataset.type = 'vertical';
+        ruler.dataset.position = x;
+        this.imageContainer.appendChild(ruler);
+        
+        // Add to vertical rulers array
+        this.verticalRulers.push({ element: ruler, position: x });
+    },
+    
+    handleMouseDown: function(e) {
+        const target = e.target;
+        
+        if (target.classList.contains('ruler')) {
+            this.activeRuler = target;
+            this.isDragging = true;
+            
+            // Get image container position for accurate calculations
+            const containerRect = this.imageContainer.getBoundingClientRect();
+            
+            // Store the initial mouse position relative to image container
+            this.startPosition = {
+                x: e.clientX - containerRect.left + this.imageContainer.scrollLeft,
+                y: e.clientY - containerRect.top + this.imageContainer.scrollTop
+            };
+            
+            // Store the initial ruler position
+            this.rulerStartPosition = parseInt(this.activeRuler.dataset.position);
+            
+            // Calculate offset between mouse position and ruler position for smoother dragging
+            if (target.dataset.type === 'horizontal') {
+                this.dragOffset = this.startPosition.y - (this.rulerStartPosition * this.zoomLevel);
+            } else {
+                this.dragOffset = this.startPosition.x - (this.rulerStartPosition * this.zoomLevel);
+            }
+            
+            e.preventDefault();
+        }
+    },
+    
+    handleMouseMove: function(e) {
+        if (!this.isDragging || !this.activeRuler) return;
+        
+        const type = this.activeRuler.dataset.type;
+        const containerRect = this.imageContainer.getBoundingClientRect();
+        
+        // Check if we need to scroll the container
+        this.checkScrollNeeds(e.clientY, containerRect);
+        
+        // Calculate mouse position relative to image container (including scroll)
+        const mouseX = e.clientX - containerRect.left + this.imageContainer.scrollLeft;
+        const mouseY = e.clientY - containerRect.top + this.imageContainer.scrollTop;
+        
+        if (type === 'horizontal') {
+            // Apply the offset and account for zoom
+            const newY = Math.max(0, Math.min(this.originalImage.height, (mouseY - this.dragOffset) / this.zoomLevel));
+            
+            // Update visual position (scaled by zoom)
+            this.activeRuler.style.top = (newY * this.zoomLevel) + 'px';
+            
+            // Store actual position (not scaled)
+            this.activeRuler.dataset.position = newY;
+            
+            // Update the ruler in our array
+            const rulerIndex = this.horizontalRulers.findIndex(r => r.element === this.activeRuler);
+            if (rulerIndex !== -1) {
+                this.horizontalRulers[rulerIndex].position = newY;
+            }
+        } else if (type === 'vertical') {
+            // Apply the offset and account for zoom
+            const newX = Math.max(0, Math.min(this.originalImage.width, (mouseX - this.dragOffset) / this.zoomLevel));
+            
+            // Update visual position (scaled by zoom)
+            this.activeRuler.style.left = (newX * this.zoomLevel) + 'px';
+            
+            // Store actual position (not scaled)
+            this.activeRuler.dataset.position = newX;
+            
+            // Update the ruler in our array
+            const rulerIndex = this.verticalRulers.findIndex(r => r.element === this.activeRuler);
+            if (rulerIndex !== -1) {
+                this.verticalRulers[rulerIndex].position = newX;
+            }
+        }
+        
+        this.updateGuideLines();
+    },
+    
+    checkScrollNeeds: function(clientY, containerRect) {
+        // Clear any existing scroll interval
+        if (this.scrollInterval) {
+            clearInterval(this.scrollInterval);
+            this.scrollInterval = null;
+        }
+        
+        const scrollSpeed = 10;
+        const scrollZone = 40; // pixels from edge that triggers scrolling
+        
+        // Check if mouse is near the top edge
+        if (clientY < containerRect.top + scrollZone) {
+            this.scrollInterval = setInterval(() => {
+                this.imageContainer.scrollTop -= scrollSpeed;
+                this.updateRulerPositionOnScroll();
+            }, 20);
+        }
+        // Check if mouse is near the bottom edge
+        else if (clientY > containerRect.bottom - scrollZone) {
+            this.scrollInterval = setInterval(() => {
+                this.imageContainer.scrollTop += scrollSpeed;
+                this.updateRulerPositionOnScroll();
+            }, 20);
+        }
+    },
+    
+    updateRulerPositionOnScroll: function() {
+        if (!this.isDragging || !this.activeRuler) return;
+        
+        const type = this.activeRuler.dataset.type;
+        
+        if (type === 'horizontal') {
+            // Get current absolute position
+            const currentPos = parseInt(this.activeRuler.dataset.position);
+            
+            // Update visual position to match scroll (accounting for zoom)
+            this.activeRuler.style.top = (currentPos * this.zoomLevel) + 'px';
+            this.updateGuideLines();
+        }
+    },
+    
+    handleMouseUp: function() {
+        this.isDragging = false;
+        this.activeRuler = null;
+        
+        // Clear any scroll interval
+        if (this.scrollInterval) {
+            clearInterval(this.scrollInterval);
+            this.scrollInterval = null;
+        }
+    },
+    
+    // Touch handlers for mobile
+    handleTouchStart: function(e) {
+        if (e.target.classList.contains('ruler')) {
+            this.activeRuler = e.target;
+            this.isDragging = true;
+            
+            // Get the touch
+            const touch = e.touches[0];
+            
+            // Get image container position for accurate calculations
+            const containerRect = this.imageContainer.getBoundingClientRect();
+            
+            // Store the initial touch position relative to image container (including scroll)
+            this.startPosition = {
+                x: touch.clientX - containerRect.left + this.imageContainer.scrollLeft,
+                y: touch.clientY - containerRect.top + this.imageContainer.scrollTop
+            };
+            
+            // Store the initial ruler position
+            this.rulerStartPosition = parseInt(this.activeRuler.dataset.position);
+            
+            // Calculate offset between touch position and ruler position for smoother dragging
+            if (this.activeRuler.dataset.type === 'horizontal') {
+                this.dragOffset = this.startPosition.y - (this.rulerStartPosition * this.zoomLevel);
+            } else {
+                this.dragOffset = this.startPosition.x - (this.rulerStartPosition * this.zoomLevel);
+            }
+            
+            e.preventDefault();
+        }
+    },
+    
+    handleTouchMove: function(e) {
+        if (!this.isDragging || !this.activeRuler) return;
+        
+        // Get the touch
+        const touch = e.touches[0];
+        const type = this.activeRuler.dataset.type;
+        
+        // Get image container position for accurate calculations
+        const containerRect = this.imageContainer.getBoundingClientRect();
+        
+        // Check if we need to scroll the container
+        this.checkScrollNeeds(touch.clientY, containerRect);
+        
+        // Calculate touch position relative to image container (including scroll)
+        const touchX = touch.clientX - containerRect.left + this.imageContainer.scrollLeft;
+        const touchY = touch.clientY - containerRect.top + this.imageContainer.scrollTop;
+        
+        if (type === 'horizontal') {
+            // Apply the offset and account for zoom
+            const newY = Math.max(0, Math.min(this.originalImage.height, (touchY - this.dragOffset) / this.zoomLevel));
+            
+            // Update visual position (scaled by zoom)
+            this.activeRuler.style.top = (newY * this.zoomLevel) + 'px';
+            
+            // Store actual position (not scaled)
+            this.activeRuler.dataset.position = newY;
+            
+            // Update the ruler in our array
+            const rulerIndex = this.horizontalRulers.findIndex(r => r.element === this.activeRuler);
+            if (rulerIndex !== -1) {
+                this.horizontalRulers[rulerIndex].position = newY;
+            }
+        } else if (type === 'vertical') {
+            // Apply the offset and account for zoom
+            const newX = Math.max(0, Math.min(this.originalImage.width, (touchX - this.dragOffset) / this.zoomLevel));
+            
+            // Update visual position (scaled by zoom)
+            this.activeRuler.style.left = (newX * this.zoomLevel) + 'px';
+            
+            // Store actual position (not scaled)
+            this.activeRuler.dataset.position = newX;
+            
+            // Update the ruler in our array
+            const rulerIndex = this.verticalRulers.findIndex(r => r.element === this.activeRuler);
+            if (rulerIndex !== -1) {
+                this.verticalRulers[rulerIndex].position = newX;
+            }
+        }
+        
+        this.updateGuideLines();
+        e.preventDefault();
+    },
+    
+    handleTouchEnd: function() {
+        this.isDragging = false;
+        this.activeRuler = null;
+        
+        // Clear any scroll interval
+        if (this.scrollInterval) {
+            clearInterval(this.scrollInterval);
+            this.scrollInterval = null;
+        }
+    },
+    
+    updateGuideLines: function() {
+        if (!this.originalImage) return;
+        
+        // Clear existing lines
+        while (this.guidelinesLayer.firstChild) {
+            this.guidelinesLayer.removeChild(this.guidelinesLayer.firstChild);
+        }
+        
+        // Draw horizontal lines
+        this.horizontalRulers.forEach(ruler => {
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', '0');
+            line.setAttribute('y1', ruler.position * this.zoomLevel);
+            line.setAttribute('x2', this.originalImage.width * this.zoomLevel);
+            line.setAttribute('y2', ruler.position * this.zoomLevel);
+            line.setAttribute('stroke', 'rgba(255, 0, 0, 0.7)');
+            line.setAttribute('stroke-width', '1');
+            this.guidelinesLayer.appendChild(line);
+        });
+        
+        // Draw vertical lines
+        this.verticalRulers.forEach(ruler => {
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', ruler.position * this.zoomLevel);
+            line.setAttribute('y1', '0');
+            line.setAttribute('x2', ruler.position * this.zoomLevel);
+            line.setAttribute('y2', this.originalImage.height * this.zoomLevel);
+            line.setAttribute('stroke', 'rgba(255, 0, 0, 0.7)');
+            line.setAttribute('stroke-width', '1');
+            this.guidelinesLayer.appendChild(line);
+        });
+        
+        // Highlight slice areas if we have rulers
+        if (this.horizontalRulers.length > 0 || this.verticalRulers.length > 0) {
+            this.previewSlices();
+        }
+    },
+    
+    previewSlices: function() {
+        // Remove existing slice previews
+        document.querySelectorAll('.slice-preview').forEach(el => el.remove());
+        document.querySelectorAll('.slice-info').forEach(el => el.remove());
+        
+        // Sort rulers by position
+        const sortedHorizontal = [...this.horizontalRulers].sort((a, b) => a.position - b.position);
+        const sortedVertical = [...this.verticalRulers].sort((a, b) => a.position - b.position);
+        
+        // Add start and end boundaries
+        const yPositions = [0, ...sortedHorizontal.map(r => r.position), this.originalImage.height];
+        const xPositions = [0, ...sortedVertical.map(r => r.position), this.originalImage.width];
+        
+        // Initialize slice configuration if needed
+        if (this.sliceConfiguration.rows.length !== yPositions.length - 1) {
+            this.sliceConfiguration.rows = Array(yPositions.length - 1).fill(true);
+        }
+        if (this.sliceConfiguration.columns.length !== xPositions.length - 1) {
+            this.sliceConfiguration.columns = Array(xPositions.length - 1).fill(true);
+        }
+        
+        // Create preview for each slice area
+        for (let i = 0; i < yPositions.length - 1; i++) {
+            for (let j = 0; j < xPositions.length - 1; j++) {
+                const x = xPositions[j];
+                const y = yPositions[i];
+                const width = xPositions[j + 1] - x;
+                const height = yPositions[i + 1] - y;
+                
+                // Create slice preview (account for zoom)
+                const preview = document.createElement('div');
+                preview.className = 'slice-preview';
+                preview.style.left = (x * this.zoomLevel) + 'px';
+                preview.style.top = (y * this.zoomLevel) + 'px';
+                preview.style.width = (width * this.zoomLevel) + 'px';
+                preview.style.height = (height * this.zoomLevel) + 'px';
+                
+                // Change color based on the slice configuration
+                const rowSliceEnabled = this.sliceConfiguration.rows[i];
+                const colSliceEnabled = this.sliceConfiguration.columns[j];
+                
+                // Visual indicator for whether this section will be sliced
+                if (!rowSliceEnabled || !colSliceEnabled) {
+                    // Full width/height section (not sliced)
+                    preview.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';  // Green for full sections
+                    preview.style.borderColor = 'green';
+                } else {
+                    // Normal sliced section
+                    preview.style.backgroundColor = 'rgba(0, 0, 255, 0.1)';  // Blue for sliced sections
+                    preview.style.borderColor = 'blue';
+                }
+                
+                this.imageContainer.appendChild(preview);
+                
+                // Create slice info label (account for zoom)
+                const info = document.createElement('div');
+                info.className = 'slice-info';
+                info.style.left = ((x * this.zoomLevel) + 5) + 'px';
+                info.style.top = ((y * this.zoomLevel) + 5) + 'px';
+                
+                // Show slice info with status
+                let sliceStatus = 'Sliced';
+                if (!rowSliceEnabled) {
+                    sliceStatus = 'Full Width';
+                } else if (!colSliceEnabled) {
+                    sliceStatus = 'Full Height';
+                }
+                
+                info.textContent = `Slice ${i}-${j}: ${width}x${height} (${sliceStatus})`;
+                this.imageContainer.appendChild(info);
+            }
+        }
+    },
+    
+    showSliceConfiguration: function() {
+        if (!this.originalImage) {
+            alert('Please load an image first.');
+            return;
+        }
+        
+        if (this.horizontalRulers.length === 0 && this.verticalRulers.length === 0) {
+            alert('Please add at least one ruler to configure slices.');
+            return;
+        }
+        
+        // Create and show the configuration modal
+        const modal = document.createElement('div');
+        modal.className = 'config-modal';
+        modal.style.position = 'fixed';
+        modal.style.top = '50%';
+        modal.style.left = '50%';
+        modal.style.transform = 'translate(-50%, -50%)';
+        modal.style.backgroundColor = 'white';
+        modal.style.padding = '20px';
+        modal.style.borderRadius = '5px';
+        modal.style.boxShadow = '0 0 10px rgba(0,0,0,0.3)';
+        modal.style.zIndex = '1000';
+        modal.style.maxHeight = '80vh';
+        modal.style.overflow = 'auto';
+        modal.style.minWidth = '300px';
+        
+        // Add header
+        const header = document.createElement('h2');
+        header.textContent = 'Slice Configuration';
+        header.style.marginTop = '0';
+        modal.appendChild(header);
+        
+        // Create sections for rows and columns
+        if (this.horizontalRulers.length > 0) {
+            const rowSection = document.createElement('div');
+            rowSection.style.marginBottom = '20px';
+            
+            const rowTitle = document.createElement('h3');
+            rowTitle.textContent = 'Row Configuration';
+            rowSection.appendChild(rowTitle);
+            
+            // Sort horizontal rulers
+            const sortedHorizontal = [...this.horizontalRulers].sort((a, b) => a.position - b.position);
+            const yPositions = [0, ...sortedHorizontal.map(r => r.position), this.originalImage.height];
+            
+            // Ensure sliceConfiguration is initialized
+            if (this.sliceConfiguration.rows.length !== yPositions.length - 1) {
+                this.sliceConfiguration.rows = Array(yPositions.length - 1).fill(true);
+            }
+            
+            // Add checkbox for each row section
+            for (let i = 0; i < yPositions.length - 1; i++) {
+                const rowItem = document.createElement('div');
+                rowItem.style.marginBottom = '10px';
+                
+                const y = yPositions[i];
+                const height = yPositions[i + 1] - y;
+                
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.id = `row-${i}`;
+                checkbox.checked = this.sliceConfiguration.rows[i];
+                checkbox.addEventListener('change', (e) => {
+                    this.sliceConfiguration.rows[i] = e.target.checked;
+                    this.previewSlices();
+                });
+                
+                const label = document.createElement('label');
+                label.htmlFor = `row-${i}`;
+                label.textContent = ` Row ${i}: ${y} to ${yPositions[i + 1]} (Height: ${height}px) - ${checkbox.checked ? 'Slice' : 'Full width'}`;
+                
+                rowItem.appendChild(checkbox);
+                rowItem.appendChild(label);
+                rowSection.appendChild(rowItem);
+            }
+            
+            modal.appendChild(rowSection);
+        }
+        
+        if (this.verticalRulers.length > 0) {
+            const colSection = document.createElement('div');
+            
+            const colTitle = document.createElement('h3');
+            colTitle.textContent = 'Column Configuration';
+            colSection.appendChild(colTitle);
+            
+            // Sort vertical rulers
+            const sortedVertical = [...this.verticalRulers].sort((a, b) => a.position - b.position);
+            const xPositions = [0, ...sortedVertical.map(r => r.position), this.originalImage.width];
+            
+            // Ensure sliceConfiguration is initialized
+            if (this.sliceConfiguration.columns.length !== xPositions.length - 1) {
+                this.sliceConfiguration.columns = Array(xPositions.length - 1).fill(true);
+            }
+            
+            // Add checkbox for each column section
+            for (let j = 0; j < xPositions.length - 1; j++) {
+                const colItem = document.createElement('div');
+                colItem.style.marginBottom = '10px';
+                
+                const x = xPositions[j];
+                const width = xPositions[j + 1] - x;
+                
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.id = `col-${j}`;
+                checkbox.checked = this.sliceConfiguration.columns[j];
+                checkbox.addEventListener('change', (e) => {
+                    this.sliceConfiguration.columns[j] = e.target.checked;
+                    this.previewSlices();
+                });
+                
+                const label = document.createElement('label');
+                label.htmlFor = `col-${j}`;
+                label.textContent = ` Column ${j}: ${x} to ${xPositions[j + 1]} (Width: ${width}px) - ${checkbox.checked ? 'Slice' : 'Full height'}`;
+                
+                colItem.appendChild(checkbox);
+                colItem.appendChild(label);
+                colSection.appendChild(colItem);
+            }
+            
+            modal.appendChild(colSection);
+        }
+        
+        // Add save button
+        const buttonGroup = document.createElement('div');
+        buttonGroup.style.marginTop = '20px';
+        buttonGroup.style.textAlign = 'right';
+        
+        const closeButton = document.createElement('button');
+        closeButton.textContent = 'Close';
+        closeButton.className = 'button';
+        closeButton.style.display = 'inline-block';
+        closeButton.style.width = 'auto';
+        closeButton.style.marginRight = '10px';
+        closeButton.style.backgroundColor = '#999';
+        closeButton.addEventListener('click', () => {
+            document.body.removeChild(modal);
+            document.body.removeChild(overlay);
+        });
+        
+        const saveButton = document.createElement('button');
+        saveButton.textContent = 'Save Configuration';
+        saveButton.className = 'button';
+        saveButton.style.display = 'inline-block';
+        saveButton.style.width = 'auto';
+        saveButton.addEventListener('click', () => {
+            document.body.removeChild(modal);
+            document.body.removeChild(overlay);
+            this.previewSlices();
+        });
+        
+        buttonGroup.appendChild(closeButton);
+        buttonGroup.appendChild(saveButton);
+        modal.appendChild(buttonGroup);
+        
+        // Create semi-transparent overlay
+        const overlay = document.createElement('div');
+        overlay.style.position = 'fixed';
+        overlay.style.top = '0';
+        overlay.style.left = '0';
+        overlay.style.width = '100%';
+        overlay.style.height = '100%';
+        overlay.style.backgroundColor = 'rgba(0,0,0,0.5)';
+        overlay.style.zIndex = '999';
+        
+        // Add to document
+        document.body.appendChild(overlay);
+        document.body.appendChild(modal);
+    },
+    
+    generateSlices: function() {
+        if (!this.originalImage) {
+            alert('Please load an image first.');
+            return;
+        }
+        
+        if (this.horizontalRulers.length === 0 && this.verticalRulers.length === 0) {
+            alert('Please add at least one ruler to slice the image.');
+            return;
+        }
+        
+        // Clear previous slices
+        this.slices = [];
+        document.getElementById('slicesList').innerHTML = '';
+        
+        // Sort rulers by position
+        const sortedHorizontal = [...this.horizontalRulers].sort((a, b) => a.position - b.position);
+        const sortedVertical = [...this.verticalRulers].sort((a, b) => a.position - b.position);
+        
+        // Add start and end boundaries
+        const yPositions = [0, ...sortedHorizontal.map(r => r.position), this.originalImage.height];
+        const xPositions = [0, ...sortedVertical.map(r => r.position), this.originalImage.width];
+        
+   // Ensure slice configuration is initialized
+   if (this.sliceConfiguration.rows.length !== yPositions.length - 1) {
+            this.sliceConfiguration.rows = Array(yPositions.length - 1).fill(true);
+        }
+        if (this.sliceConfiguration.columns.length !== xPositions.length - 1) {
+            this.sliceConfiguration.columns = Array(xPositions.length - 1).fill(true);
+        }
+        
+        // Create slices based on configuration
+        let sliceCount = 0;
+        
+        // Process full width rows first (these will ignore vertical slicing)
+        for (let i = 0; i < yPositions.length - 1; i++) {
+            const y = yPositions[i];
+            const height = yPositions[i + 1] - y;
+            
+            if (!this.sliceConfiguration.rows[i]) {
+                // This is a full width row - create a single slice for the entire row
+                const x = 0;
+                const width = this.originalImage.width;
+                
+                // Create a temporary canvas for the slice
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = width;
+                tempCanvas.height = height;
+                const tempCtx = tempCanvas.getContext('2d');
+                
+                // Create a temporary image to draw from the original
+                const tempImg = new Image();
+                tempImg.src = this.originalImage.src;
+                
+                // Draw the slice to the temporary canvas
+                tempCtx.drawImage(tempImg, x, y, width, height, 0, 0, width, height);
+                
+                // Store the slice information
+                const sliceData = {
+                    canvas: tempCanvas,
+                    x, y, width, height,
+                    name: `full_width_row_${i}.png`
+                };
+                
+                this.slices.push(sliceData);
+                
+                // Add slice to the UI list
+                this.addSliceToUI(sliceData, `Full Width Row ${i}`, width, height);
+                sliceCount++;
+            } else {
+                // This row should be sliced according to columns
+                for (let j = 0; j < xPositions.length - 1; j++) {
+                    const x = xPositions[j];
+                    const width = xPositions[j + 1] - x;
+                    
+                    if (!this.sliceConfiguration.columns[j]) {
+                        // This is a full height column within a sliced row
+                        // Skip it as we'll handle it in the full height column processing
+                        continue;
+                    }
+                    
+                    // Create a temporary canvas for the slice
+                    const tempCanvas = document.createElement('canvas');
+                    tempCanvas.width = width;
+                    tempCanvas.height = height;
+                    const tempCtx = tempCanvas.getContext('2d');
+                    
+                    // Create a temporary image to draw from the original
+                    const tempImg = new Image();
+                    tempImg.src = this.originalImage.src;
+                    
+                    // Draw the slice to the temporary canvas
+                    tempCtx.drawImage(tempImg, x, y, width, height, 0, 0, width, height);
+                    
+                    // Store the slice information
+                    const sliceData = {
+                        canvas: tempCanvas,
+                        x, y, width, height,
+                        name: `slice_${i}_${j}.png`
+                    };
+                    
+                    this.slices.push(sliceData);
+                    
+                    // Add slice to the UI list
+                    this.addSliceToUI(sliceData, `Slice ${i}-${j}`, width, height);
+                    sliceCount++;
+                }
+            }
+        }
+        
+        // Process full height columns (these will ignore horizontal slicing except for rows marked as full width)
+        for (let j = 0; j < xPositions.length - 1; j++) {
+            if (!this.sliceConfiguration.columns[j]) {
+                const x = xPositions[j];
+                const width = xPositions[j + 1] - x;
+                
+                // For each full height column, we need to determine the vertical spans
+                // that haven't already been covered by full width rows
+                let currentY = 0;
+                let startY = 0;
+                let inSpan = true;
+                
+                // Go through each row boundary
+                for (let i = 0; i <= yPositions.length - 1; i++) {
+                    currentY = i < yPositions.length - 1 ? yPositions[i] : this.originalImage.height;
+                    
+                    // If we encounter a full width row or we're at the end, end the current span
+                    if (i > 0 && !this.sliceConfiguration.rows[i-1] || i === yPositions.length - 1) {
+                        if (inSpan && currentY > startY) {
+                            // Extract this vertical span as a full height slice
+                            const height = currentY - startY;
+                            
+                            // Create a temporary canvas for the slice
+                            const tempCanvas = document.createElement('canvas');
+                            tempCanvas.width = width;
+                            tempCanvas.height = height;
+                            const tempCtx = tempCanvas.getContext('2d');
+                            
+                            // Create a temporary image to draw from the original
+                            const tempImg = new Image();
+                            tempImg.src = this.originalImage.src;
+                            
+                            // Draw the slice to the temporary canvas
+                            tempCtx.drawImage(tempImg, x, startY, width, height, 0, 0, width, height);
+                            
+                            // Store the slice information
+                            const sliceData = {
+                                canvas: tempCanvas,
+                                x, y: startY, width, height,
+                                name: `full_height_col_${j}_span_${startY}_${currentY}.png`
+                            };
+                            
+                            this.slices.push(sliceData);
+                            
+                            // Add slice to the UI list
+                            this.addSliceToUI(sliceData, `Full Height Col ${j} (${startY}-${currentY})`, width, height);
+                            sliceCount++;
+                        }
+                        inSpan = false;
+                    }
+                    
+                    // If we encounter a non-full width row or we're at the beginning, start a new span
+                    if ((i < yPositions.length - 1 && this.sliceConfiguration.rows[i]) || i === 0) {
+                        if (!inSpan) {
+                            startY = currentY;
+                            inSpan = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        alert(`Created ${sliceCount} slices successfully.`);
+    },
+    
+    addSliceToUI: function(sliceData, title, width, height) {
+        const slicesList = document.getElementById('slicesList');
+        const sliceItem = document.createElement('div');
+        sliceItem.className = 'slice-item';
+        sliceItem.textContent = `${title}: ${width}x${height}`;
+        sliceItem.addEventListener('click', () => this.downloadSlice(sliceData));
+        slicesList.appendChild(sliceItem);
+    },
+    
+    downloadSlice: function(sliceData) {
+        const link = document.createElement('a');
+        link.download = sliceData.name;
+        link.href = sliceData.canvas.toDataURL('image/png');
+        link.click();
+    },
+    
+    downloadAllSlices: function() {
+        if (this.slices.length === 0) {
+            alert('No slices to download. Please slice the image first.');
+            return;
+        }
+        
+        // Create a zip file
+        const zip = new JSZip();
+        let filesProcessed = 0;
+        
+        // Add each slice to the zip
+        this.slices.forEach(slice => {
+            // Convert canvas to blob
+            slice.canvas.toBlob(blob => {
+                zip.file(slice.name, blob);
+                filesProcessed++;
+                
+                // When all files are added, generate and download the zip
+                if (filesProcessed === this.slices.length) {
+                    zip.generateAsync({type: 'blob'}).then(content => {
+                        const link = document.createElement('a');
+                        link.download = 'image_slices.zip';
+                        link.href = URL.createObjectURL(content);
+                        link.click();
+                    });
+                }
+            }, 'image/png');
+        });
+    },
+    
+    clearRulers: function() {
+        // Remove ruler elements from DOM
+        this.horizontalRulers.forEach(ruler => ruler.element.remove());
+        this.verticalRulers.forEach(ruler => ruler.element.remove());
+        
+        // Clear arrays
+        this.horizontalRulers = [];
+        this.verticalRulers = [];
+        this.slices = [];
+        
+        // Reset configuration
+        this.sliceConfiguration = {
+            rows: [],
+            columns: []
+        };
+        
+        // Clear the slices list
+        document.getElementById('slicesList').innerHTML = '';
+        
+        // Remove slice previews
+        document.querySelectorAll('.slice-preview').forEach(el => el.remove());
+        document.querySelectorAll('.slice-info').forEach(el => el.remove());
+        
+        // Clear guidelines
+        while (this.guidelinesLayer.firstChild) {
+            this.guidelinesLayer.removeChild(this.guidelinesLayer.firstChild);
+        }
+    }
+};
+
+// Initialize the application when the page loads
+window.onload = function() {
+    // Add the configuration button to the UI
+    const toolsDiv = document.querySelector('.tools');
+    const configureButton = document.createElement('button');
+    configureButton.id = 'configureSlices';
+    configureButton.className = 'button';
+    configureButton.textContent = 'Configure Slices';
+    
+    // Insert after "Clear All Rulers" button
+    const clearRulersButton = document.getElementById('clearRulers');
+    toolsDiv.insertBefore(configureButton, clearRulersButton.nextSibling);
+    
+    app.init();
+};
+    </script>
+</body>
+</html>
